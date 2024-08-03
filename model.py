@@ -1,32 +1,66 @@
 import pandas as pd
+import numpy as np
 import os
 
-# Define the column names
-columns = [
-    'BufferId', 'Time', 'S11', 'S01', 'S03', 'S05', 'S07', 'S09', 'S06', 'S02', 'S04', 'S08', 'S10', 'S12', 
-    'T3', 'T4', 'T2', 'T1', 'L1', 'L2', 'L4', 'L3', 'V1', 'V2', 'V3', 'V4', 'Unnamed: 26'
-]
-
-# Conversion factor from nm to tonnage
-conversion_factor = 0.01  # Example value, adjust as necessary
-
-# Function to read and clean data from individual files
-def prepare_data(file_paths, label):
+def load_data(file_paths):
     data = []
     for file_path in file_paths:
-        df = pd.read_csv(file_path, delimiter=',', names=columns, header=0)
-        df['TrainId'] = os.path.basename(file_path)
-        df['Condition'] = label
+        df = pd.read_csv(file_path)
+        df['TrainId'] = file_path.split('/')[-1]
         data.append(df)
-    combined_data = pd.concat(data, ignore_index=True)
-    return combined_data
+    return pd.concat(data, ignore_index=True)
 
-# File paths to cleaned files
+def calculate_mdil_adil(df, odd_columns, even_columns):
+    df['Left_MDIL'] = df[odd_columns].max(axis=1)
+    df['Right_MDIL'] = df[even_columns].max(axis=1)
+    
+    df['Left_ADIL'] = df[odd_columns].apply(lambda row: (row.sum() - row.max()) / 5, axis=1)
+    df['Right_ADIL'] = df[even_columns].apply(lambda row: (row.sum() - row.max()) / 5, axis=1)
+    
+    df['Left_ILF'] = df['Left_MDIL'] / df['Left_ADIL']
+    df['Right_ILF'] = df['Right_MDIL'] / df['Right_ADIL']
+    
+    return df
+
+def convert_to_tonnage(df, conversion_factor):
+    df['Left_MDIL'] = df['Left_MDIL'] * conversion_factor
+    df['Right_MDIL'] = df['Right_MDIL'] * conversion_factor
+    return df
+
+def determine_wheel_status(df):
+    conditions_left = [
+        (df['Left_MDIL'] >= 35) | (df['Left_ILF'] >= 4.5),
+        (20 <= df['Left_MDIL']) & (df['Left_MDIL'] < 35) | (2 <= df['Left_ILF']) & (df['Left_ILF'] < 4.5)
+    ]
+    choices_left = ['Critical', 'Warning']
+    df['Left_Wheel_Status'] = np.select(conditions_left, choices_left, default='Good')
+    
+    conditions_right = [
+        (df['Right_MDIL'] >= 35) | (df['Right_ILF'] >= 4.5),
+        (20 <= df['Right_MDIL']) & (df['Right_MDIL'] < 35) | (2 <= df['Right_ILF']) & (df['Right_ILF'] < 4.5)
+    ]
+    choices_right = ['Critical', 'Warning']
+    df['Right_Wheel_Status'] = np.select(conditions_right, choices_right, default='Good')
+    
+    return df
+
+def save_to_excel(df, filename):
+    with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:
+        for train_id in df['TrainId'].unique():
+            train_data = df[df['TrainId'] == train_id]
+            train_data.to_excel(writer, sheet_name=train_id, index=False)
+
+# Main process
+conversion_factor = 0.01  # This is just an example, adjust as necessary
+odd_columns = ['S01', 'S03', 'S05', 'S07', 'S09', 'S11']
+even_columns = ['S02', 'S04', 'S06', 'S08', 'S10', 'S12']
+
 critical_files = [
     'C:/Users/sreec/OneDrive/Desktop/csv_files 2/Critical_Cleaned/T20240507124521.csv',
     'C:/Users/sreec/OneDrive/Desktop/csv_files 2/Critical_Cleaned/T20240509153421.csv',
     'C:/Users/sreec/OneDrive/Desktop/csv_files 2/Critical_Cleaned/T20240609040556.csv'
 ]
+
 good_files = [
     'C:/Users/sreec/OneDrive/Desktop/csv_files 2/Good_Cleaned/T20240609080529.csv',
     'C:/Users/sreec/OneDrive/Desktop/csv_files 2/Good_Cleaned/T20240609083255.csv',
@@ -35,72 +69,36 @@ good_files = [
     'C:/Users/sreec/OneDrive/Desktop/csv_files 2/Good_Cleaned/T20240609132748.csv'
 ]
 
-# Prepare data
-critical_data = prepare_data(critical_files, 'Critical')
-good_data = prepare_data(good_files, 'Good')
+# Load and preprocess data
+critical_data = load_data(critical_files)
+good_data = load_data(good_files)
 
-# Calculate MDIL, ADIL, and ILF for each axle
-def calculate_ilf(df):
-    df['Left_MDIL'] = df[['S01', 'S03', 'S05', 'S07', 'S09', 'S11']].max(axis=1) * conversion_factor
-    df['Right_MDIL'] = df[['S02', 'S04', 'S06', 'S08', 'S10', 'S12']].max(axis=1) * conversion_factor
-    
-    df['Left_ADIL'] = df[['S01', 'S03', 'S05', 'S07', 'S09', 'S11']].apply(lambda x: (x.sum() - x.max()) / 5 * conversion_factor, axis=1)
-    df['Right_ADIL'] = df[['S02', 'S04', 'S06', 'S08', 'S10', 'S12']].apply(lambda x: (x.sum() - x.max()) / 5 * conversion_factor, axis=1)
-    
-    df['Left_ILF'] = df['Left_MDIL'] / df['Left_ADIL']
-    df['Right_ILF'] = df['Right_MDIL'] / df['Right_ADIL']
-    
-    return df
+# Calculate MDIL, ADIL, and ILF
+critical_data = calculate_mdil_adil(critical_data, odd_columns, even_columns)
+good_data = calculate_mdil_adil(good_data, odd_columns, even_columns)
 
-critical_data = calculate_ilf(critical_data)
-good_data = calculate_ilf(good_data)
+# Convert MDIL to tonnage
+critical_data = convert_to_tonnage(critical_data, conversion_factor)
+good_data = convert_to_tonnage(good_data, conversion_factor)
 
-# Define thresholds for ILF based on provided examples
-ilf_threshold_critical = 4.5
-ilf_threshold_warning = 2
-mdil_threshold_critical = 35
-mdil_threshold_warning = 20
+# Determine wheel status
+critical_data = determine_wheel_status(critical_data)
+good_data = determine_wheel_status(good_data)
 
-# Determine wheel status based on ILF values
-def determine_wheel_status(ilf, mdil):
-    if mdil >= mdil_threshold_critical or ilf >= ilf_threshold_critical:
-        return 'Critical'
-    elif mdil_threshold_warning <= mdil < mdil_threshold_critical or ilf_threshold_warning <= ilf < ilf_threshold_critical:
-        return 'Warning'
-    else:
-        return 'Good'
+# Combine and save results
+combined_data = pd.concat([critical_data, good_data], ignore_index=True)
 
-# Apply the function to determine wheel status
-critical_data['Left_Wheel_Status'] = critical_data.apply(lambda x: determine_wheel_status(x['Left_ILF'], x['Left_MDIL']), axis=1)
-critical_data['Right_Wheel_Status'] = critical_data.apply(lambda x: determine_wheel_status(x['Right_ILF'], x['Right_MDIL']), axis=1)
-good_data['Left_Wheel_Status'] = good_data.apply(lambda x: determine_wheel_status(x['Left_ILF'], x['Left_MDIL']), axis=1)
-good_data['Right_Wheel_Status'] = good_data.apply(lambda x: determine_wheel_status(x['Right_ILF'], x['Right_MDIL']), axis=1)
+# Extract the required columns and rename for clarity
+combined_data_left = combined_data[['TrainId', 'BufferId', 'Left_MDIL', 'Left_ILF', 'Left_Wheel_Status']].copy()
+combined_data_left['Side'] = 'Left'
+combined_data_left = combined_data_left.rename(columns={'Left_MDIL': 'MDIL', 'Left_ILF': 'ILF', 'Left_Wheel_Status': 'Wheel_Status'})
 
-# Extract relevant columns
-left_wheels_info_critical = critical_data[['BufferId', 'Left_MDIL', 'Left_ILF', 'Left_Wheel_Status']].copy()
-right_wheels_info_critical = critical_data[['BufferId', 'Right_MDIL', 'Right_ILF', 'Right_Wheel_Status']].copy()
-left_wheels_info_good = good_data[['BufferId', 'Left_MDIL', 'Left_ILF', 'Left_Wheel_Status']].copy()
-right_wheels_info_good = good_data[['BufferId', 'Right_MDIL', 'Right_ILF', 'Right_Wheel_Status']].copy()
+combined_data_right = combined_data[['TrainId', 'BufferId', 'Right_MDIL', 'Right_ILF', 'Right_Wheel_Status']].copy()
+combined_data_right['Side'] = 'Right'
+combined_data_right = combined_data_right.rename(columns={'Right_MDIL': 'MDIL', 'Right_ILF': 'ILF', 'Right_Wheel_Status': 'Wheel_Status'})
 
-# Rename columns for right wheels to match the left wheels
-right_wheels_info_critical.columns = ['BufferId', 'MDIL', 'ILF', 'Wheel_Status']
-left_wheels_info_critical.columns = ['BufferId', 'MDIL', 'ILF', 'Wheel_Status']
-right_wheels_info_good.columns = ['BufferId', 'MDIL', 'ILF', 'Wheel_Status']
-left_wheels_info_good.columns = ['BufferId', 'MDIL', 'ILF', 'Wheel_Status']
+# Combine left and right wheel data
+final_combined_data = pd.concat([combined_data_left, combined_data_right], ignore_index=True)
 
-# Add the side information
-left_wheels_info_critical['Side'] = 'Left'
-right_wheels_info_critical['Side'] = 'Right'
-left_wheels_info_good['Side'] = 'Left'
-right_wheels_info_good['Side'] = 'Right'
-
-# Combine left and right wheel information
-combined_wheels_info = pd.concat([left_wheels_info_critical, right_wheels_info_critical, left_wheels_info_good, right_wheels_info_good])
-
-# Select only the relevant columns
-combined_wheels_info = combined_wheels_info[['BufferId', 'Side', 'MDIL', 'ILF', 'Wheel_Status']]
-
-# Save the combined results to a single CSV file
-combined_wheels_info.to_csv('C:/Users/sreec/OneDrive/Desktop/csv_files 2/wheel_conditions_with_train_info.csv', index=False)
-
-print("Detailed info of wheels saved to 'wheel_conditions_with_train_info.csv'")
+# Save final results to Excel
+save_to_excel(final_combined_data, 'wheel_conditions_with_train_info.xlsx')
