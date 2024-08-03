@@ -1,18 +1,14 @@
 import pandas as pd
-import numpy as np
 import os
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, confusion_matrix
-import joblib
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 # Define the column names
 columns = [
     'BufferId', 'Time', 'S11', 'S01', 'S03', 'S05', 'S07', 'S09', 'S06', 'S02', 'S04', 'S08', 'S10', 'S12', 
     'T3', 'T4', 'T2', 'T1', 'L1', 'L2', 'L4', 'L3', 'V1', 'V2', 'V3', 'V4', 'Unnamed: 26'
 ]
+
+# Conversion factor from nm to tonnage
+conversion_factor = 0.01  # Example value, adjust as necessary
 
 # Function to read and clean data from individual files
 def prepare_data(file_paths, label):
@@ -43,102 +39,68 @@ good_files = [
 critical_data = prepare_data(critical_files, 'Critical')
 good_data = prepare_data(good_files, 'Good')
 
-# Combine data for analysis
-combined_data = pd.concat([critical_data, good_data], ignore_index=True)
+# Calculate MDIL, ADIL, and ILF for each axle
+def calculate_ilf(df):
+    df['Left_MDIL'] = df[['S01', 'S03', 'S05', 'S07', 'S09', 'S11']].max(axis=1) * conversion_factor
+    df['Right_MDIL'] = df[['S02', 'S04', 'S06', 'S08', 'S10', 'S12']].max(axis=1) * conversion_factor
+    
+    df['Left_ADIL'] = df[['S01', 'S03', 'S05', 'S07', 'S09', 'S11']].apply(lambda x: (x.sum() - x.max()) / 5 * conversion_factor, axis=1)
+    df['Right_ADIL'] = df[['S02', 'S04', 'S06', 'S08', 'S10', 'S12']].apply(lambda x: (x.sum() - x.max()) / 5 * conversion_factor, axis=1)
+    
+    df['Left_ILF'] = df['Left_MDIL'] / df['Left_ADIL']
+    df['Right_ILF'] = df['Right_MDIL'] / df['Right_ADIL']
+    
+    return df
 
-# Drop unnecessary column if present
-if 'Unnamed: 26' in combined_data.columns:
-    combined_data = combined_data.drop(columns=['Unnamed: 26'])
+critical_data = calculate_ilf(critical_data)
+good_data = calculate_ilf(good_data)
 
-# Handle any missing values
-combined_data = combined_data.dropna()
+# Define thresholds for ILF based on provided examples
+ilf_threshold_critical = 4.5
+ilf_threshold_warning = 2
+mdil_threshold_critical = 35
+mdil_threshold_warning = 20
 
-# Ensure valid data for threshold calculation by removing zero values
-good_data_valid = good_data[(good_data[sensor_columns] > 0).all(axis=1)]
+# Determine wheel status based on ILF values
+def determine_wheel_status(ilf, mdil):
+    if mdil >= mdil_threshold_critical or ilf >= ilf_threshold_critical:
+        return 'Critical'
+    elif mdil_threshold_warning <= mdil < mdil_threshold_critical or ilf_threshold_warning <= ilf < ilf_threshold_critical:
+        return 'Warning'
+    else:
+        return 'Good'
 
-# Recalculate statistical measures for valid good data
-good_stats = good_data_valid[sensor_columns].describe().T
+# Apply the function to determine wheel status
+critical_data['Left_Wheel_Status'] = critical_data.apply(lambda x: determine_wheel_status(x['Left_ILF'], x['Left_MDIL']), axis=1)
+critical_data['Right_Wheel_Status'] = critical_data.apply(lambda x: determine_wheel_status(x['Right_ILF'], x['Right_MDIL']), axis=1)
+good_data['Left_Wheel_Status'] = good_data.apply(lambda x: determine_wheel_status(x['Left_ILF'], x['Left_MDIL']), axis=1)
+good_data['Right_Wheel_Status'] = good_data.apply(lambda x: determine_wheel_status(x['Right_ILF'], x['Right_MDIL']), axis=1)
 
-# Determine thresholds based on good data
-thresholds = {}
-for sensor in sensor_columns:
-    mean = good_stats.loc[sensor, 'mean']
-    std = good_stats.loc[sensor, 'std']
-    thresholds[sensor] = mean + 3 * std  # Example threshold using mean + 3*std
+# Extract relevant columns
+left_wheels_info_critical = critical_data[['BufferId', 'Left_MDIL', 'Left_ILF', 'Left_Wheel_Status']].copy()
+right_wheels_info_critical = critical_data[['BufferId', 'Right_MDIL', 'Right_ILF', 'Right_Wheel_Status']].copy()
+left_wheels_info_good = good_data[['BufferId', 'Left_MDIL', 'Left_ILF', 'Left_Wheel_Status']].copy()
+right_wheels_info_good = good_data[['BufferId', 'Right_MDIL', 'Right_ILF', 'Right_Wheel_Status']].copy()
 
-print("Determined thresholds for each sensor:")
-print(thresholds)
+# Rename columns for right wheels to match the left wheels
+right_wheels_info_critical.columns = ['BufferId', 'MDIL', 'ILF', 'Wheel_Status']
+left_wheels_info_critical.columns = ['BufferId', 'MDIL', 'ILF', 'Wheel_Status']
+right_wheels_info_good.columns = ['BufferId', 'MDIL', 'ILF', 'Wheel_Status']
+left_wheels_info_good.columns = ['BufferId', 'MDIL', 'ILF', 'Wheel_Status']
 
-# Detect spikes in critical data based on the determined thresholds
-spikes = pd.DataFrame()
-for sensor in sensor_columns:
-    spikes[sensor] = (critical_data[sensor] > thresholds[sensor])
+# Add the side information
+left_wheels_info_critical['Side'] = 'Left'
+right_wheels_info_critical['Side'] = 'Right'
+left_wheels_info_good['Side'] = 'Left'
+right_wheels_info_good['Side'] = 'Right'
 
-# Visualize the spikes detected
-for sensor in sensor_columns:
-    plt.figure(figsize=(15, 5))
-    plt.plot(critical_data[sensor], label='Critical Data', color='red', alpha=0.6)
-    plt.plot(spikes[sensor], label='Detected Spikes', color='blue', alpha=0.6)
-    plt.title(f'Sensor {sensor} - Detected Spikes')
-    plt.xlabel('Sample')
-    plt.ylabel('Reading')
-    plt.legend()
-    plt.show()
+# Combine left and right wheel information
+combined_wheels_info = pd.concat([left_wheels_info_critical, right_wheels_info_critical, left_wheels_info_good, right_wheels_info_good])
 
-# Add spikes information to combined data
-for column in sensor_columns:
-    combined_data[f'{column}_Spike'] = spikes[column]
+# Select only the relevant columns
+combined_wheels_info = combined_wheels_info[['BufferId', 'Side', 'MDIL', 'ILF', 'Wheel_Status']]
 
-# Separate the data back into training and testing
-train_data = combined_data[~combined_data['TrainId'].str.contains('T20240609040556.csv')]
-test_data = combined_data[combined_data['TrainId'].str.contains('T20240609040556.csv')]
+# Save the combined results to a single CSV file
+combined_wheels_info.to_csv('C:/Users/sreec/OneDrive/Desktop/csv_files 2/wheel_conditions_with_train_info.csv', index=False)
 
-# Train-Test Split
-X_train = train_data.drop(columns=['Condition', 'TrainId', 'BufferId', 'Time'])
-y_train = train_data['Condition']
-X_test = test_data.drop(columns=['Condition', 'TrainId', 'BufferId', 'Time'])
-y_test = test_data['Condition']
-
-# Train the model
-clf = RandomForestClassifier(n_estimators=100, random_state=42)
-clf.fit(X_train, y_train)
-
-# Evaluate the model
-y_pred = clf.predict(X_test)
-print(classification_report(y_test, y_pred))
-conf_matrix = confusion_matrix(y_test, y_pred)
-print(conf_matrix)
-
-# Save the trained model
-joblib.dump(clf, 'stress_model.pkl')
-
-# Feature importance
-feature_importances = pd.DataFrame(clf.feature_importances_, index=X_train.columns, columns=['importance']).sort_values('importance', ascending=False)
-
-# Plot feature importance
-plt.figure(figsize=(10, 8))
-sns.barplot(x=feature_importances['importance'], y=feature_importances.index)
-plt.title('Feature Importance')
-plt.xlabel('Importance')
-plt.ylabel('Features')
-plt.show()
-
-# Predict the condition for each wheel
-combined_data['PredictedCondition'] = clf.predict(combined_data.drop(columns=['Condition', 'TrainId', 'BufferId', 'Time']))
-
-# Group by TrainId and get the count of each condition per train
-train_wheel_summary = combined_data.groupby(['TrainId', 'PredictedCondition']).size().unstack(fill_value=0)
-
-# Detailed information about each wheel's condition
-detailed_wheel_info = combined_data[['TrainId', 'BufferId', 'Time', 'PredictedCondition']]
-
-# Identify critical wheels
-critical_wheels = combined_data[combined_data['PredictedCondition'] == 'Critical']
-
-# Save the predictions along with TrainId and wheel info
-detailed_wheel_info.to_csv('C:/Users/sreec/OneDrive/Desktop/csv_files 2/wheel_conditions_with_train_info.csv', index=False)
-train_wheel_summary.to_csv('C:/Users/sreec/OneDrive/Desktop/csv_files 2/train_wheel_summary.csv')
-critical_wheels.to_csv('C:/Users/sreec/OneDrive/Desktop/csv_files 2/critical_wheels_info.csv', index=False)
-print("Predictions for each wheel saved to 'wheel_conditions_with_train_info.csv'")
-print("Summary of wheel conditions per train saved to 'train_wheel_summary.csv'")
-print("Detailed info of critical wheels saved to 'critical_wheels_info.csv'")
+print("Detailed info of wheels saved to 'wheel_conditions_with_train_info.csv'")
